@@ -5,6 +5,7 @@ from urllib.parse import urljoin
 from datetime import datetime
 import re
 
+# ✅ Corregido: sin espacios al final
 SEACE_URL = "https://prod6.seace.gob.pe/buscador-publico/contrataciones"
 
 def parse_fecha_seace(fecha_str: str):
@@ -20,17 +21,22 @@ def fecha_en_rango(fecha_str: str, fecha_inicio: str, fecha_fin: str) -> bool:
         return False
     inicio = datetime.strptime(fecha_inicio, "%d/%m/%Y")
     fin = datetime.strptime(fecha_fin, "%d/%m/%Y")
-    # Comparar solo fechas, ignorar horas para el rango
     return inicio.date() <= fecha.date() <= fin.date()
 
 def extraer_tipo(desc: str) -> str:
-    if not isinstance(desc, str): return "Otro"
+    if not isinstance(desc, str):
+        return "Otro"
     d = desc.lower()
-    if d.startswith("bien:"): return "Bien"
-    elif d.startswith("servicio:"): return "Servicio"
-    elif d.startswith("obra:"): return "Obra"
-    elif "consultor" in d: return "Consultoría"
-    else: return "Otro"
+    if d.startswith("bien:"):
+        return "Bien"
+    elif d.startswith("servicio:"):
+        return "Servicio"
+    elif d.startswith("obra:"):
+        return "Obra"
+    elif "consultor" in d:
+        return "Consultoría"
+    else:
+        return "Otro"
 
 async def get_cubso(page, url):
     """Extrae el CUBSO de una URL específica"""
@@ -38,7 +44,8 @@ async def get_cubso(page, url):
         return "No disponible"
     try:
         await page.goto(url, timeout=20000)
-        await page.wait_for_timeout(1000) # Pequeña espera para carga dinámica
+        # ✅ Espera a que la página cargue contenido
+        await page.wait_for_selector("body", timeout=10000)
         content = await page.content()
         soup = BeautifulSoup(content, "html.parser")
 
@@ -62,44 +69,52 @@ async def run_scraper(fecha_inicio: str, fecha_fin: str, max_items: int, include
     items_data = []
 
     async with async_playwright() as p:
-        # Importante: args para que corra bien en Docker
-        browser = await p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage"])
-        context = await browser.new_context()
+        browser = await p.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage"]
+        )
+        context = await browser.new_context(
+            viewport={"width": 1920, "height": 1080}
+        )
         page = await context.new_page()
 
         try:
             print(f"Navegando a SEACE: {fecha_inicio} - {fecha_fin}")
             await page.goto(SEACE_URL, timeout=60000)
-            await page.wait_for_timeout(4000)
+            # ✅ Espera a que aparezcan los primeros resultados
+            await page.wait_for_selector("div.bg-fondo-section.rounded-md.p-5.ng-star-inserted", timeout=30000)
 
-            # Intentar cambiar a 100 items (opcional, puede fallar y no es crítico)
+            # Intentar cambiar a 100 resultados por página
             try:
                 select = await page.query_selector("mat-select[aria-labelledby*='mat-paginator-page-size-label']")
                 if select:
                     await select.click()
                     opt = await page.query_selector("mat-option:has-text('100')")
-                    if opt: await opt.click()
-                    await page.wait_for_timeout(3000)
-            except:
-                pass
+                    if opt:
+                        await opt.click()
+                    # Esperar a que la página se actualice
+                    await page.wait_for_selector("div.bg-fondo-section.rounded-md.p-5.ng-star-inserted", timeout=15000)
+            except Exception as e:
+                print(f"No se pudo cambiar a 100 resultados: {e}")
 
-            # Bucle de páginas
             page_count = 1
-            max_paginas = 10 # Limite de seguridad para evitar timeouts en API
+            max_paginas = 10
 
             while page_count <= max_paginas and len(items_data) < max_items:
+                print(f"Procesando página {page_count}...")
                 cards = await page.query_selector_all("div.bg-fondo-section.rounded-md.p-5.ng-star-inserted")
-                if not cards: break
+                if not cards:
+                    print("No se encontraron más tarjetas.")
+                    break
 
                 for card in cards:
-                    if len(items_data) >= max_items: break
-
+                    if len(items_data) >= max_items:
+                        break
                     try:
                         html = await card.inner_html()
                         soup = BeautifulSoup(html, "html.parser")
                         p_tags = soup.select("p")
 
-                        # Extracción básica
                         fecha_raw = "No disponible"
                         for p in p_tags:
                             if "Fecha de publicación:" in p.get_text():
@@ -123,25 +138,27 @@ async def run_scraper(fecha_inicio: str, fecha_fin: str, max_items: int, include
                             "tipo": extraer_tipo(desc),
                             "fecha_publicacion": fecha_raw.replace("Fecha de publicación:", "").strip(),
                             "enlace": enlace,
-                            "cubso": None # Se llenará si se pide
+                            "cubso": None
                         }
-
                         items_data.append(item)
+
                     except Exception as e:
                         continue
 
-                # Siguiente página
-                next_btn = await page.query_selector("button.mat-mdc-paginator-navigation-next")
-                if not next_btn or await next_btn.is_disabled():
+                # Verificar si hay página siguiente
+                next_btn = await page.query_selector("button.mat-mdc-paginator-navigation-next:not([disabled])")
+                if not next_btn:
+                    print("No hay más páginas.")
                     break
 
                 await next_btn.click()
-                await page.wait_for_timeout(2000)
+                # ✅ Esperar a que carguen los nuevos resultados
+                await page.wait_for_selector("div.bg-fondo-section.rounded-md.p-5.ng-star-inserted", timeout=20000)
                 page_count += 1
 
-            # Segunda pasada: Obtener CUBSO si se solicitó
+            # Extraer CUBSO si se solicita
             if include_cubso and items_data:
-                print("Extrayendo CUBSOs...")
+                print(f"Extrayendo CUBSO para {len(items_data)} licitaciones...")
                 for item in items_data:
                     if item["enlace"] != "No disponible":
                         item["cubso"] = await get_cubso(page, item["enlace"])
