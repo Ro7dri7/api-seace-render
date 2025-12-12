@@ -10,7 +10,7 @@ app = FastAPI(title="API Scraper SEACE")
 class ScrapeRequest(BaseModel):
     fecha_inicio: str  # Formato dd/mm/yyyy
     fecha_fin: str     # Formato dd/mm/yyyy
-    max_resultados: int = 10
+    max_resultados: int = 100  # ✅ Ajustado a 100 para Render
     incluir_cubso: bool = False
 
 @app.get("/")
@@ -23,12 +23,16 @@ async def scrape_endpoint(request: ScrapeRequest):
     Endpoint principal.
     Recibe JSON: { "fecha_inicio": "27/10/2025", "fecha_fin": "02/11/2025", "incluir_cubso": true }
     """
-    # Validaciones básicas de formato de fecha
-    try:
-        if len(request.fecha_inicio) != 10 or len(request.fecha_fin) != 10:
-            raise ValueError("Formato de fecha incorrecto")
-    except:
-        raise HTTPException(status_code=400, detail="Las fechas deben ser dd/mm/yyyy")
+    # Validación básica del formato de fecha (dd/mm/yyyy)
+    if (
+            len(request.fecha_inicio) != 10
+            or len(request.fecha_fin) != 10
+            or request.fecha_inicio[2] != '/'
+            or request.fecha_inicio[5] != '/'
+            or request.fecha_fin[2] != '/'
+            or request.fecha_fin[5] != '/'
+    ):
+        raise HTTPException(status_code=400, detail="Las fechas deben tener formato dd/mm/yyyy")
 
     try:
         print(f"Solicitud recibida: {request}")
@@ -40,10 +44,10 @@ async def scrape_endpoint(request: ScrapeRequest):
         )
         return {"cantidad": len(data), "resultados": data}
     except Exception as e:
-        print(f"Error interno: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        print(f"Error interno en scraper: {e}")
+        raise HTTPException(status_code=500, detail="Error al procesar la solicitud")
 
 if __name__ == "__main__":
-    # Render asigna un puerto en la variable de entorno PORT
+    # Render asigna el puerto en la variable de entorno PORT
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
