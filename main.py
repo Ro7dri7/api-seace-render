@@ -10,7 +10,7 @@ app = FastAPI(title="API Scraper SEACE")
 class ScrapeRequest(BaseModel):
     fecha_inicio: str  # Formato dd/mm/yyyy
     fecha_fin: str     # Formato dd/mm/yyyy
-    max_resultados: int = 100  # ✅ Ajustado a 100 para Render
+    max_resultados: int = 2000  # ✅ Límite de seguridad alto (no es un tope real)
     incluir_cubso: bool = False
 
 @app.get("/")

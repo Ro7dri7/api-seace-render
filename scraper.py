@@ -89,7 +89,7 @@ async def run_scraper(fecha_inicio: str, fecha_fin: str, max_items: int, include
                 print(f"No se pudo cambiar a 100 resultados: {e}")
 
             page_count = 1
-            max_paginas = 4  # ✅ Reducido para Render
+            max_paginas = 50  # ✅ Límite alto, pero seguro
 
             while page_count <= max_paginas and len(items_data) < max_items:
                 print(f"📄 Página {page_count} | Recopilados: {len(items_data)}")
@@ -97,9 +97,9 @@ async def run_scraper(fecha_inicio: str, fecha_fin: str, max_items: int, include
                 if not cards:
                     break
 
+                en_rango_en_pagina = False  # Indica si hay al menos una licitación en rango
+
                 for card in cards:
-                    if len(items_data) >= max_items:
-                        break
                     try:
                         html = await card.inner_html()
                         soup = BeautifulSoup(html, "html.parser")
@@ -111,27 +111,36 @@ async def run_scraper(fecha_inicio: str, fecha_fin: str, max_items: int, include
                                 fecha_raw = p.get_text(strip=True)
                                 break
 
-                        if not fecha_en_rango(fecha_raw, fecha_inicio, fecha_fin):
-                            continue
+                        if fecha_en_rango(fecha_raw, fecha_inicio, fecha_fin):
+                            en_rango_en_pagina = True
+                            codigo = p_tags[0].get_text(strip=True) if len(p_tags) > 0 else "N/A"
+                            entidad = p_tags[1].get_text(strip=True) if len(p_tags) > 1 else "N/A"
+                            desc = p_tags[2].get_text(strip=True) if len(p_tags) > 2 else "N/A"
 
-                        codigo = p_tags[0].get_text(strip=True) if len(p_tags) > 0 else "N/A"
-                        entidad = p_tags[1].get_text(strip=True) if len(p_tags) > 1 else "N/A"
-                        desc = p_tags[2].get_text(strip=True) if len(p_tags) > 2 else "N/A"
+                            link_elem = soup.select_one("a[href*='/buscador-publico/contrataciones/']")
+                            enlace = urljoin(SEACE_URL, link_elem["href"]) if link_elem else "No disponible"
 
-                        link_elem = soup.select_one("a[href*='/buscador-publico/contrataciones/']")
-                        enlace = urljoin(SEACE_URL, link_elem["href"]) if link_elem else "No disponible"
+                            items_data.append({
+                                "codigo": codigo,
+                                "entidad": entidad,
+                                "descripcion": desc,
+                                "tipo": extraer_tipo(desc),
+                                "fecha_publicacion": fecha_raw.replace("Fecha de publicación:", "").strip(),
+                                "enlace": enlace,
+                                "cubso": None
+                            })
 
-                        items_data.append({
-                            "codigo": codigo,
-                            "entidad": entidad,
-                            "descripcion": desc,
-                            "tipo": extraer_tipo(desc),
-                            "fecha_publicacion": fecha_raw.replace("Fecha de publicación:", "").strip(),
-                            "enlace": enlace,
-                            "cubso": None
-                        })
-                    except:
+                            # Protección contra bucle infinito
+                            if len(items_data) >= max_items:
+                                break
+
+                    except Exception:
                         continue
+
+                # ✅ Si NO hubo ninguna licitación en rango en toda la página, dejamos de buscar
+                if not en_rango_en_pagina:
+                    print("🔍 No más licitaciones en el rango de fechas. Deteniendo búsqueda.")
+                    break
 
                 # Siguiente página
                 next_btn = await page.query_selector("button.mat-mdc-paginator-navigation-next:not([disabled])")
@@ -140,10 +149,10 @@ async def run_scraper(fecha_inicio: str, fecha_fin: str, max_items: int, include
 
                 await next_btn.click()
                 await page.wait_for_selector("div.bg-fondo-section.rounded-md.p-5.ng-star-inserted", timeout=30000)
-                await asyncio.sleep(1.5)  # ✅ Evita rate-limiting
+                await asyncio.sleep(1.5)
                 page_count += 1
 
-            # Extraer CUBSO si se pide
+            # Extraer CUBSO si se solicita
             if include_cubso and items_data:
                 print(f"🔍 Extrayendo CUBSO para {len(items_data)} licitaciones...")
                 for item in items_data:
