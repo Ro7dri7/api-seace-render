@@ -4,8 +4,13 @@ from bs4 import BeautifulSoup
 from urllib.parse import urljoin
 from datetime import datetime
 import re
+import logging
 
-# ✅ CORREGIDO: SIN ESPACIOS AL FINAL
+# Configuración básica de logging para diagnóstico
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("SEACE_Scraper")
+
+# URL corregida sin espacios al final
 SEACE_URL = "https://prod6.seace.gob.pe/buscador-publico/contrataciones"
 
 def parse_fecha_seace(fecha_str: str):
@@ -45,35 +50,40 @@ def extraer_tipo(desc: str) -> str:
         return "Otro"
 
 async def get_cubso(page, url):
-    """Extrae el código CUBSO de una licitación individual."""
+    """Extrae el código CUBSO de una licitación individual (opcional)."""
     if url == "No disponible":
         return "No disponible"
     try:
-        await page.goto(url, timeout=25000)
-        await page.wait_for_selector("body", timeout=10000)
+        await page.goto(url, timeout=30000)
+        await page.wait_for_selector("body", timeout=15000)
         content = await page.content()
         soup = BeautifulSoup(content, "html.parser")
 
-        # Buscar en celdas con clase "codCubso"
         for cell in soup.find_all("td", class_=re.compile(r".*codCubso.*", re.IGNORECASE)):
             txt = cell.get_text(strip=True)
             if txt.isdigit() and 13 <= len(txt) <= 16:
                 return txt
 
-        # Buscar en todo el texto como último recurso
         match = re.search(r"\b\d{13,16}\b", soup.get_text())
         return match.group() if match else "No encontrado"
     except Exception as e:
+        logger.warning(f"Error al extraer CUBSO: {e}")
         return "Error"
 
 async def run_scraper(fecha_inicio: str, fecha_fin: str, max_items: int, include_cubso: bool):
-    """Ejecuta el scraper principal de SEACE."""
     items_data = []
+    logger.info(f"Iniciando scraping: {fecha_inicio} - {fecha_fin}, max: {max_items}")
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(
             headless=True,
-            args=["--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage"]
+            args=[
+                "--no-sandbox",
+                "--disable-setuid-sandbox",
+                "--disable-gpu",
+                "--disable-dev-shm-usage",
+                "--single-process"  # útil en entornos con poca RAM como Render
+            ]
         )
         context = await browser.new_context(
             viewport={"width": 1920, "height": 1080},
@@ -82,29 +92,45 @@ async def run_scraper(fecha_inicio: str, fecha_fin: str, max_items: int, include
         page = await context.new_page()
 
         try:
-            print(f"Navegando a SEACE: {fecha_inicio} - {fecha_fin}")
+            # Navegamos a la URL
+            logger.info("Navegando a SEACE...")
             await page.goto(SEACE_URL, timeout=90000)
-            await page.wait_for_selector("div.bg-fondo-section.rounded-md.p-5.ng-star-inserted", timeout=60000)
+
+            # ✅ ESPERAMOS A QUE LA APLICACIÓN REACT SE CARGUE COMPLETAMENTE
+            # Esto evita el error "You need to enable JavaScript..."
+            await page.wait_for_function("""
+                () => {
+                    const hasReactRoot = document.querySelector('#root') !== null;
+                    const hasCards = document.querySelectorAll('div[class*="bg-fondo-section"]').length > 0;
+                    const hasSpinner = document.querySelector('.spinner') === null;
+                    return hasReactRoot && (hasCards || !hasSpinner);
+                }
+            """, timeout=60000)
+
+            logger.info("App de SEACE cargada correctamente.")
 
             # Intentar cambiar a 100 resultados por página
             try:
-                select = await page.query_selector("mat-select[aria-labelledby*='mat-paginator-page-size-label']")
-                if select:
-                    await select.click()
+                select_button = await page.query_selector("button[aria-haspopup='listbox']")
+                if select_button:
+                    await select_button.click()
                     opt = await page.query_selector("mat-option:has-text('100')")
                     if opt:
                         await opt.click()
-                    await page.wait_for_selector("div.bg-fondo-section.rounded-md.p-5.ng-star-inserted", timeout=30000)
+                        await page.wait_for_timeout(3000)
             except Exception as e:
-                print(f"No se pudo cambiar a 100 resultados: {e}")
+                logger.warning(f"No se pudo cambiar a 100 resultados: {e}")
 
             page_count = 1
-            max_paginas = 50
+            max_paginas = min(50, (max_items // 20) + 5)  # Límite dinámico
 
             while page_count <= max_paginas and len(items_data) < max_items:
-                print(f"📄 Página {page_count} | Recopilados: {len(items_data)}")
-                cards = await page.query_selector_all("div.bg-fondo-section.rounded-md.p-5.ng-star-inserted")
+                logger.info(f"Procesando página {page_count} | Recopilados: {len(items_data)}")
+
+                # ✅ Selector robusto: busca por contenido visual, no por clases frágiles
+                cards = await page.query_selector_all('div[class*="bg-fondo-section"]')
                 if not cards:
+                    logger.info("No se encontraron más tarjetas. Finalizando.")
                     break
 
                 en_rango_en_pagina = False
@@ -144,33 +170,37 @@ async def run_scraper(fecha_inicio: str, fecha_fin: str, max_items: int, include
                                 break
 
                     except Exception as e:
+                        logger.debug(f"Error al procesar tarjeta: {e}")
                         continue
 
-                # ✅ Detener si no hay más licitaciones en rango
+                # Detener si no hay más licitaciones en rango
                 if not en_rango_en_pagina:
-                    print("🔍 No más licitaciones en el rango de fechas. Deteniendo búsqueda.")
+                    logger.info("No más licitaciones en el rango de fechas. Deteniendo.")
                     break
 
-                # Ir a la siguiente página
-                next_btn = await page.query_selector("button.mat-mdc-paginator-navigation-next:not([disabled])")
+                # Siguiente página
+                next_btn = await page.query_selector("button[aria-label*='iguiente']:not([disabled])")
                 if not next_btn:
                     break
 
                 await next_btn.click()
-                await page.wait_for_selector("div.bg-fondo-section.rounded-md.p-5.ng-star-inserted", timeout=45000)
-                await asyncio.sleep(1.5)
+                await page.wait_for_timeout(2000)
                 page_count += 1
 
             # Extraer CUBSO si se solicita
             if include_cubso and items_data:
-                print(f"🔍 Extrayendo CUBSO para {len(items_data)} licitaciones...")
+                logger.info(f"Extrayendo CUBSO para {len(items_data)} licitaciones...")
                 for item in items_data:
                     if item["enlace"] != "No disponible":
                         item["cubso"] = await get_cubso(page, item["enlace"])
                     else:
                         item["cubso"] = "No enlace"
 
+        except Exception as e:
+            logger.error(f"Error crítico en el scraper: {e}")
+            raise
         finally:
             await browser.close()
 
+    logger.info(f"Scraping finalizado. Total obtenido: {len(items_data)}")
     return items_data
