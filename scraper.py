@@ -5,25 +5,31 @@ from urllib.parse import urljoin
 from datetime import datetime
 import re
 
-# ✅ CORREGIDO: sin espacios al final
+# ✅ CORREGIDO: SIN ESPACIOS AL FINAL
 SEACE_URL = "https://prod6.seace.gob.pe/buscador-publico/contrataciones"
 
 def parse_fecha_seace(fecha_str: str):
+    """Convierte una cadena de fecha SEACE a objeto datetime."""
     try:
         fecha_str = fecha_str.replace("Fecha de publicación:", "").strip()
         return datetime.strptime(fecha_str, "%d/%m/%Y %H:%M:%S")
-    except:
+    except (ValueError, AttributeError):
         return None
 
 def fecha_en_rango(fecha_str: str, fecha_inicio: str, fecha_fin: str) -> bool:
+    """Verifica si una licitación está dentro del rango de fechas."""
     fecha = parse_fecha_seace(fecha_str)
     if not fecha:
         return False
-    inicio = datetime.strptime(fecha_inicio, "%d/%m/%Y")
-    fin = datetime.strptime(fecha_fin, "%d/%m/%Y")
-    return inicio.date() <= fecha.date() <= fin.date()
+    try:
+        inicio = datetime.strptime(fecha_inicio, "%d/%m/%Y")
+        fin = datetime.strptime(fecha_fin, "%d/%m/%Y")
+        return inicio.date() <= fecha.date() <= fin.date()
+    except ValueError:
+        return False
 
 def extraer_tipo(desc: str) -> str:
+    """Clasifica el tipo de licitación según la descripción."""
     if not isinstance(desc, str):
         return "Otro"
     d = desc.lower()
@@ -39,6 +45,7 @@ def extraer_tipo(desc: str) -> str:
         return "Otro"
 
 async def get_cubso(page, url):
+    """Extrae el código CUBSO de una licitación individual."""
     if url == "No disponible":
         return "No disponible"
     try:
@@ -47,17 +54,20 @@ async def get_cubso(page, url):
         content = await page.content()
         soup = BeautifulSoup(content, "html.parser")
 
+        # Buscar en celdas con clase "codCubso"
         for cell in soup.find_all("td", class_=re.compile(r".*codCubso.*", re.IGNORECASE)):
             txt = cell.get_text(strip=True)
             if txt.isdigit() and 13 <= len(txt) <= 16:
                 return txt
 
+        # Buscar en todo el texto como último recurso
         match = re.search(r"\b\d{13,16}\b", soup.get_text())
         return match.group() if match else "No encontrado"
     except Exception as e:
         return "Error"
 
 async def run_scraper(fecha_inicio: str, fecha_fin: str, max_items: int, include_cubso: bool):
+    """Ejecuta el scraper principal de SEACE."""
     items_data = []
 
     async with async_playwright() as p:
@@ -74,9 +84,9 @@ async def run_scraper(fecha_inicio: str, fecha_fin: str, max_items: int, include
         try:
             print(f"Navegando a SEACE: {fecha_inicio} - {fecha_fin}")
             await page.goto(SEACE_URL, timeout=90000)
-            await page.wait_for_selector("div.bg-fondo-section.rounded-md.p-5.ng-star-inserted", timeout=45000)
+            await page.wait_for_selector("div.bg-fondo-section.rounded-md.p-5.ng-star-inserted", timeout=60000)
 
-            # Intentar 100 por página
+            # Intentar cambiar a 100 resultados por página
             try:
                 select = await page.query_selector("mat-select[aria-labelledby*='mat-paginator-page-size-label']")
                 if select:
@@ -84,12 +94,12 @@ async def run_scraper(fecha_inicio: str, fecha_fin: str, max_items: int, include
                     opt = await page.query_selector("mat-option:has-text('100')")
                     if opt:
                         await opt.click()
-                    await page.wait_for_selector("div.bg-fondo-section.rounded-md.p-5.ng-star-inserted", timeout=20000)
+                    await page.wait_for_selector("div.bg-fondo-section.rounded-md.p-5.ng-star-inserted", timeout=30000)
             except Exception as e:
                 print(f"No se pudo cambiar a 100 resultados: {e}")
 
             page_count = 1
-            max_paginas = 50  # ✅ Límite alto, pero seguro
+            max_paginas = 50
 
             while page_count <= max_paginas and len(items_data) < max_items:
                 print(f"📄 Página {page_count} | Recopilados: {len(items_data)}")
@@ -97,7 +107,7 @@ async def run_scraper(fecha_inicio: str, fecha_fin: str, max_items: int, include
                 if not cards:
                     break
 
-                en_rango_en_pagina = False  # Indica si hay al menos una licitación en rango
+                en_rango_en_pagina = False
 
                 for card in cards:
                     try:
@@ -130,25 +140,24 @@ async def run_scraper(fecha_inicio: str, fecha_fin: str, max_items: int, include
                                 "cubso": None
                             })
 
-                            # Protección contra bucle infinito
                             if len(items_data) >= max_items:
                                 break
 
-                    except Exception:
+                    except Exception as e:
                         continue
 
-                # ✅ Si NO hubo ninguna licitación en rango en toda la página, dejamos de buscar
+                # ✅ Detener si no hay más licitaciones en rango
                 if not en_rango_en_pagina:
                     print("🔍 No más licitaciones en el rango de fechas. Deteniendo búsqueda.")
                     break
 
-                # Siguiente página
+                # Ir a la siguiente página
                 next_btn = await page.query_selector("button.mat-mdc-paginator-navigation-next:not([disabled])")
                 if not next_btn:
                     break
 
                 await next_btn.click()
-                await page.wait_for_selector("div.bg-fondo-section.rounded-md.p-5.ng-star-inserted", timeout=30000)
+                await page.wait_for_selector("div.bg-fondo-section.rounded-md.p-5.ng-star-inserted", timeout=45000)
                 await asyncio.sleep(1.5)
                 page_count += 1
 
