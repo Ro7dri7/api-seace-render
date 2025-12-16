@@ -6,7 +6,6 @@ from datetime import datetime
 import re
 import logging
 
-# Configuración de logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("SEACE_Scraper")
 
@@ -14,7 +13,6 @@ logger = logging.getLogger("SEACE_Scraper")
 SEACE_URL = "https://prod6.seace.gob.pe/buscador-publico/contrataciones"
 
 def parse_fecha_seace(fecha_str: str):
-    """Convierte una cadena de fecha SEACE a objeto datetime."""
     try:
         fecha_str = fecha_str.replace("Fecha de publicación:", "").strip()
         return datetime.strptime(fecha_str, "%d/%m/%Y %H:%M:%S")
@@ -22,19 +20,14 @@ def parse_fecha_seace(fecha_str: str):
         return None
 
 def fecha_en_rango(fecha_str: str, fecha_inicio: str, fecha_fin: str) -> bool:
-    """Verifica si una licitación está dentro del rango de fechas."""
     fecha = parse_fecha_seace(fecha_str)
     if not fecha:
         return False
-    try:
-        inicio = datetime.strptime(fecha_inicio, "%d/%m/%Y")
-        fin = datetime.strptime(fecha_fin, "%d/%m/%Y")
-        return inicio.date() <= fecha.date() <= fin.date()
-    except ValueError:
-        return False
+    inicio = datetime.strptime(fecha_inicio, "%d/%m/%Y")
+    fin = datetime.strptime(fecha_fin, "%d/%m/%Y")
+    return inicio.date() <= fecha.date() <= fin.date()
 
 def extraer_tipo(desc: str) -> str:
-    """Clasifica el tipo de licitación según la descripción."""
     if not isinstance(desc, str):
         return "Otro"
     d = desc.lower()
@@ -50,7 +43,6 @@ def extraer_tipo(desc: str) -> str:
         return "Otro"
 
 async def get_cubso(page, url):
-    """Extrae el código CUBSO de una licitación individual (opcional)."""
     if url == "No disponible":
         return "No disponible"
     try:
@@ -67,7 +59,6 @@ async def get_cubso(page, url):
         match = re.search(r"\b\d{13,16}\b", soup.get_text())
         return match.group() if match else "No encontrado"
     except Exception as e:
-        logger.warning(f"Error al extraer CUBSO: {e}")
         return "Error"
 
 async def run_scraper(fecha_inicio: str, fecha_fin: str, max_items: int, include_cubso: bool):
@@ -82,7 +73,7 @@ async def run_scraper(fecha_inicio: str, fecha_fin: str, max_items: int, include
                 "--disable-setuid-sandbox",
                 "--disable-gpu",
                 "--disable-dev-shm-usage",
-                "--single-process"  # crucial para Render Free
+                "--single-process"  # Crítico para Render Free
             ]
         )
         context = await browser.new_context(
@@ -92,22 +83,18 @@ async def run_scraper(fecha_inicio: str, fecha_fin: str, max_items: int, include
         page = await context.new_page()
 
         try:
-            # Navegamos a la URL
+            # Navegamos a SEACE
             logger.info("Navegando a SEACE...")
-            await page.goto(SEACE_URL, timeout=120000)
+            await page.goto(SEACE_URL, timeout=60000)
 
-            # ✅ ESPERA DINÁMICA: aseguramos que React renderice
-            await page.wait_for_function("""
-                () => {
-                    const hasReactRoot = document.querySelector('#root') !== null;
-                    const hasSpinner = document.querySelector('.spinner') === null;
-                    const hasAnyCard = document.querySelectorAll('div[class*="bg-fondo-section"]').length > 0;
-                    return hasReactRoot && (hasAnyCard || hasSpinner === false);
-                }
-            """, timeout=120000)
-            logger.info("App de SEACE cargada correctamente.")
+            # Esperamos a que el body esté presente
+            await page.wait_for_selector("body", timeout=30000)
 
-            # Intentar cambiar a 100 resultados por página
+            # Simulamos interacción humana
+            await page.evaluate("window.scrollBy(0, 500)")
+            await asyncio.sleep(2)  # Tiempo realista
+
+            # Intentar cambiar a 100 resultados
             try:
                 select_button = await page.query_selector("button[aria-haspopup='listbox']")
                 if select_button:
@@ -115,22 +102,25 @@ async def run_scraper(fecha_inicio: str, fecha_fin: str, max_items: int, include
                     opt = await page.query_selector("mat-option:has-text('100')")
                     if opt:
                         await opt.click()
-                        await page.wait_for_timeout(3000)
+                        await asyncio.sleep(2)
             except Exception as e:
                 logger.warning(f"No se pudo cambiar a 100 resultados: {e}")
 
             page_count = 1
-            max_paginas = min(50, (max_items // 20) + 5)
+            max_paginas = 200  # Límite alto, pero seguro
 
-            while page_count <= max_paginas and len(items_data) < max_items:
+            # Determinar límite efectivo
+            max_items_effective = max_items if max_items is not None else float('inf')
+
+            while page_count <= max_paginas and len(items_data) < max_items_effective:
                 logger.info(f"Procesando página {page_count} | Recopilados: {len(items_data)}")
+
                 cards = await page.query_selector_all('div[class*="bg-fondo-section"]')
                 if not cards:
                     logger.info("No se encontraron más tarjetas. Finalizando.")
                     break
 
                 en_rango_en_pagina = False
-
                 for card in cards:
                     try:
                         html = await card.inner_html()
@@ -162,16 +152,15 @@ async def run_scraper(fecha_inicio: str, fecha_fin: str, max_items: int, include
                                 "cubso": None
                             })
 
-                            if len(items_data) >= max_items:
+                            if len(items_data) >= max_items_effective:
                                 break
 
                     except Exception as e:
-                        logger.debug(f"Error al procesar tarjeta: {e}")
                         continue
 
-                # Detener si no hay más licitaciones en rango
+                # Si no hay licitaciones en rango en toda la página, detenemos
                 if not en_rango_en_pagina:
-                    logger.info("No más licitaciones en el rango de fechas. Deteniendo.")
+                    logger.info("No más licitaciones en el rango de fechas. Deteniendo búsqueda.")
                     break
 
                 # Siguiente página
@@ -180,7 +169,8 @@ async def run_scraper(fecha_inicio: str, fecha_fin: str, max_items: int, include
                     break
 
                 await next_btn.click()
-                await page.wait_for_timeout(2000)
+                await page.wait_for_selector('div[class*="bg-fondo-section"]', timeout=45000)
+                await asyncio.sleep(2)
                 page_count += 1
 
             # Extraer CUBSO si se solicita
