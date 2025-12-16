@@ -6,11 +6,11 @@ from datetime import datetime
 import re
 import logging
 
-# Configuración básica de logging para diagnóstico
+# Configuración de logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("SEACE_Scraper")
 
-# URL corregida sin espacios al final
+# ✅ URL CORREGIDA: sin espacios al final
 SEACE_URL = "https://prod6.seace.gob.pe/buscador-publico/contrataciones"
 
 def parse_fecha_seace(fecha_str: str):
@@ -82,7 +82,7 @@ async def run_scraper(fecha_inicio: str, fecha_fin: str, max_items: int, include
                 "--disable-setuid-sandbox",
                 "--disable-gpu",
                 "--disable-dev-shm-usage",
-                "--single-process"  # útil en entornos con poca RAM como Render
+                "--single-process"  # crucial para Render Free
             ]
         )
         context = await browser.new_context(
@@ -94,19 +94,17 @@ async def run_scraper(fecha_inicio: str, fecha_fin: str, max_items: int, include
         try:
             # Navegamos a la URL
             logger.info("Navegando a SEACE...")
-            await page.goto(SEACE_URL, timeout=90000)
+            await page.goto(SEACE_URL, timeout=120000)
 
-            # ✅ ESPERAMOS A QUE LA APLICACIÓN REACT SE CARGUE COMPLETAMENTE
-            # Esto evita el error "You need to enable JavaScript..."
+            # ✅ ESPERA DINÁMICA: aseguramos que React renderice
             await page.wait_for_function("""
                 () => {
                     const hasReactRoot = document.querySelector('#root') !== null;
-                    const hasCards = document.querySelectorAll('div[class*="bg-fondo-section"]').length > 0;
                     const hasSpinner = document.querySelector('.spinner') === null;
-                    return hasReactRoot && (hasCards || !hasSpinner);
+                    const hasAnyCard = document.querySelectorAll('div[class*="bg-fondo-section"]').length > 0;
+                    return hasReactRoot && (hasAnyCard || hasSpinner === false);
                 }
-            """, timeout=60000)
-
+            """, timeout=120000)
             logger.info("App de SEACE cargada correctamente.")
 
             # Intentar cambiar a 100 resultados por página
@@ -122,12 +120,10 @@ async def run_scraper(fecha_inicio: str, fecha_fin: str, max_items: int, include
                 logger.warning(f"No se pudo cambiar a 100 resultados: {e}")
 
             page_count = 1
-            max_paginas = min(50, (max_items // 20) + 5)  # Límite dinámico
+            max_paginas = min(50, (max_items // 20) + 5)
 
             while page_count <= max_paginas and len(items_data) < max_items:
                 logger.info(f"Procesando página {page_count} | Recopilados: {len(items_data)}")
-
-                # ✅ Selector robusto: busca por contenido visual, no por clases frágiles
                 cards = await page.query_selector_all('div[class*="bg-fondo-section"]')
                 if not cards:
                     logger.info("No se encontraron más tarjetas. Finalizando.")
