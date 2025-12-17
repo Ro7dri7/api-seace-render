@@ -12,7 +12,7 @@ logger = logging.getLogger("SEACE_Scraper")
 
 SEACE_URL = "https://prod6.seace.gob.pe/buscador-publico/contrataciones"
 
-# Lista de palabras que NO son entidades, son estados del proceso
+# Palabras que son estados y NO deben ser detectadas como Entidad
 ESTADOS_IGNORAR = [
     "VIGENTE", "EN EVALUACION", "EN EVALUACIÓN",
     "ADJUDICADO", "DESIERTO", "CANCELADO",
@@ -45,26 +45,18 @@ def parse_fecha_regex(texto_completo: str):
     return None
 
 def extraer_tipo_exacto(desc: str) -> str:
-    """
-    Extrae el tipo basándose en el prefijo explícito 'Bien:', 'Servicio:', 'Obra:'.
-    Si no tiene prefijo, usa palabras clave.
-    """
+    """Clasifica: Bien, Servicio, Obra o Consultoría."""
     if not isinstance(desc, str): return "Otro"
 
     d_upper = desc.upper().strip()
 
-    # 1. Búsqueda EXACTA por prefijo (Lo más fiable según tu imagen)
-    # Ejemplo: "Bien: ADQUISICION DE..."
-    if d_upper.startswith("BIEN") or "BIEN:" in d_upper:
-        return "Bien"
-    if d_upper.startswith("SERVICIO") or "SERVICIO:" in d_upper:
-        return "Servicio"
-    if d_upper.startswith("OBRA") or "OBRA:" in d_upper:
-        return "Obra"
-    if "CONSULTOR" in d_upper:
-        return "Consultoría"
+    # 1. Búsqueda EXACTA por prefijo
+    if d_upper.startswith("BIEN") or "BIEN:" in d_upper: return "Bien"
+    if d_upper.startswith("SERVICIO") or "SERVICIO:" in d_upper: return "Servicio"
+    if d_upper.startswith("OBRA") or "OBRA:" in d_upper: return "Obra"
+    if "CONSULTOR" in d_upper: return "Consultoría"
 
-    # 2. Fallback: Palabras clave si falta el prefijo
+    # 2. Fallback: Palabras clave
     keywords_obra = ["MEJORAMIENTO", "CREACION", "REHABILITACION", "CONSTRUCCION", "INSTALACION", "EJECUCION DE OBRA"]
     if any(k in d_upper for k in keywords_obra): return "Obra"
 
@@ -88,18 +80,6 @@ def inferir_region(entidad: str, texto_tarjeta: str) -> str:
         if d in texto_busqueda:
             return d
     return "NO IDENTIFICADO"
-
-def extraer_fechas_cronograma(texto_tarjeta: str):
-    fechas = {"inicio": None, "fin": None}
-    regex_fecha = r"(\d{2}/\d{2}/\d{4})"
-
-    match_ini = re.search(r"(?:Inicio|Desde|Presentación).*?" + regex_fecha, texto_tarjeta, re.IGNORECASE)
-    if match_ini: fechas["inicio"] = match_ini.group(1)
-
-    match_fin = re.search(r"(?:Fin|Hasta|Cierre|Límite).*?" + regex_fecha, texto_tarjeta, re.IGNORECASE)
-    if match_fin: fechas["fin"] = match_fin.group(1)
-
-    return fechas
 
 async def run_scraper(fecha_inicio_str: str, fecha_fin_str: str, max_items: int):
     items_data = []
@@ -175,39 +155,28 @@ async def run_scraper(fecha_inicio_str: str, fecha_fin_str: str, max_items: int)
                             stop_scraping = True
                             break
 
-                        # === LÓGICA DE EXTRACCIÓN MEJORADA ===
-
-                        # 1. Dividimos por líneas y limpiamos espacios
+                        # === LÓGICA DE EXTRACCIÓN ===
                         raw_lines = [l.strip() for l in text_content.split('\n') if l.strip()]
 
-                        # 2. FILTRO DE ESTADOS: Eliminamos líneas que sean solo "VIGENTE", "EN EVALUACION", etc.
+                        # Filtro de estados (VIGENTE, etc.)
                         clean_lines = [
                             line for line in raw_lines
                             if line.upper() not in ESTADOS_IGNORAR
                         ]
 
-                        # 3. Asignación inteligente basada en posición
-                        # Línea 0: Nomenclatura (CM-xxx...)
-                        # Línea 1: Entidad (Municipalidad...)
-                        # Línea 2: Descripción (Bien: Adquisición...)
-
                         nomenclatura = clean_lines[0] if len(clean_lines) > 0 else "S/D"
                         entidad = clean_lines[1] if len(clean_lines) > 1 else "S/D"
                         descripcion = clean_lines[2] if len(clean_lines) > 2 else "S/D"
 
-                        # Si la descripción quedó vacía o parece una fecha, intentamos buscarla
-                        # Buscamos la línea que empiece con Bien:/Servicio:/Obra: si la posición falla
+                        # Corrección si la descripción no quedó en la línea 2
                         for line in clean_lines:
                             if re.match(r"^(Bien|Servicio|Obra|Consultor)", line, re.IGNORECASE):
                                 descripcion = line
                                 break
 
-                        # 4. Extraer datos derivados
                         region = inferir_region(entidad, text_content)
-                        fechas_crono = extraer_fechas_cronograma(text_content)
-                        tipo_objeto = extraer_tipo_exacto(descripcion) # Ahora usa la descripción correcta
+                        tipo_objeto = extraer_tipo_exacto(descripcion)
 
-                        # Extraer URL
                         html = await card.inner_html()
                         soup = BeautifulSoup(html, "html.parser")
                         link_elem = soup.select_one("a[href*='/buscador-publico/contrataciones/']")
@@ -215,6 +184,7 @@ async def run_scraper(fecha_inicio_str: str, fecha_fin_str: str, max_items: int)
 
                         if not enlace: continue
 
+                        # === OBJETO FINAL LIMPIO (SIN FECHAS INICIO/FIN NI VALOR REF) ===
                         items_data.append({
                             "nomenclatura": nomenclatura,
                             "entidad_solicitante": entidad,
@@ -222,11 +192,8 @@ async def run_scraper(fecha_inicio_str: str, fecha_fin_str: str, max_items: int)
                             "objeto": tipo_objeto,
                             "region": region,
                             "fecha_publicacion": fecha_obj.strftime("%d/%m/%Y"),
-                            "fecha_inicio": fechas_crono["inicio"] if fechas_crono["inicio"] else "Ver Link",
-                            "fecha_fin": fechas_crono["fin"] if fechas_crono["fin"] else "Ver Link",
                             "moneda": "SOLES",
-                            "valor_referencial": "---",
-                            "descripcion_item": descripcion,
+                            "descripcion_item": descripcion, # Redundante pero útil
                             "url": enlace
                         })
                         items_added_this_page += 1
