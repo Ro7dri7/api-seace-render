@@ -11,7 +11,7 @@ class ScrapeRequest(BaseModel):
     fecha_inicio: str  # Formato dd/mm/yyyy
     fecha_fin: str     # Formato dd/mm/yyyy
     max_resultados: Optional[int] = None  # Sin límite por defecto
-    incluir_cubso: bool = False
+    # Se eliminó incluir_cubso porque ya no existe en el scraper
 
 @app.get("/")
 def read_root():
@@ -32,14 +32,17 @@ async def scrape_endpoint(request: ScrapeRequest):
 
     try:
         print(f"Solicitud recibida: {request}")
-        # Ejecutamos el scraper y esperamos la respuesta (Síncrono)
+
+        # --- CORRECCIÓN AQUÍ ---
+        # Solo pasamos los 3 argumentos que acepta el nuevo scraper.py
         data = await run_scraper(
             request.fecha_inicio,
             request.fecha_fin,
-            request.max_resultados,
-            request.incluir_cubso
+            request.max_resultados
         )
+
         return {"cantidad": len(data), "resultados": data}
+
     except Exception as e:
         print(f"Error interno en scraper: {e}")
         raise HTTPException(status_code=500, detail=f"Error al procesar la solicitud: {str(e)}")
