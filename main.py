@@ -32,17 +32,18 @@ async def scrape_endpoint(request: ScrapeRequest):
 
     try:
         print(f"Solicitud recibida: {request}")
+        # Ejecutamos el scraper y esperamos la respuesta (Síncrono)
         data = await run_scraper(
             request.fecha_inicio,
             request.fecha_fin,
-            request.max_resultados,  # Puede ser None → sin límite
+            request.max_resultados,
             request.incluir_cubso
         )
         return {"cantidad": len(data), "resultados": data}
     except Exception as e:
         print(f"Error interno en scraper: {e}")
-        raise HTTPException(status_code=500, detail="Error al procesar la solicitud")
+        raise HTTPException(status_code=500, detail=f"Error al procesar la solicitud: {str(e)}")
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000))  # Render espera 10000
+    port = int(os.environ.get("PORT", 10000))
     uvicorn.run(app, host="0.0.0.0", port=port)

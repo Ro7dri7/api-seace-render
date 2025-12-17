@@ -12,58 +12,99 @@ logger = logging.getLogger("SEACE_Scraper")
 
 SEACE_URL = "https://prod6.seace.gob.pe/buscador-publico/contrataciones"
 
-def parse_fecha_regex(texto_completo: str):
-    """
-    Busca cualquier patrón de fecha y hora (dd/mm/yyyy HH:mm) dentro del texto.
-    Es inmune a cambios en el HTML, solo necesita que el texto sea visible.
-    """
-    # Regex: busca dd/mm/yyyy seguido de hora hh:mm
-    match = re.search(r"(\d{2}/\d{2}/\d{4}\s+\d{2}:\d{2})", texto_completo)
-    if match:
-        try:
-            fecha_str = match.group(1)
-            # Normalizar espacios múltiples
-            fecha_str = re.sub(r"\s+", " ", fecha_str)
-            return datetime.strptime(fecha_str, "%d/%m/%Y %H:%M")
-        except ValueError:
-            return None
-    return None
+# --- LISTA DE DEPARTAMENTOS PARA DETECCIÓN INTELIGENTE ---
+DEPARTAMENTOS_PERU = [
+    "AMAZONAS", "ANCASH", "APURIMAC", "AREQUIPA", "AYACUCHO", "CAJAMARCA", "CALLAO",
+    "CUSCO", "HUANCAVELICA", "HUANUCO", "ICA", "JUNIN", "LA LIBERTAD",
+    "LAMBAYEQUE", "LIMA", "LORETO", "MADRE DE DIOS", "MOQUEGUA", "PASCO",
+    "PIURA", "PUNO", "SAN MARTIN", "TACNA", "TUMBES", "UCAYALI"
+]
+
+def limpiar_texto(texto: str) -> str:
+    """Elimina espacios extra y saltos de línea."""
+    if not texto: return ""
+    return re.sub(r'\s+', ' ', texto).strip()
 
 def extraer_tipo(desc: str) -> str:
+    """Deduce el Objeto (Bien, Servicio, Obra) basado en la descripción."""
     if not isinstance(desc, str): return "Otro"
     d = desc.lower()
-    if d.startswith("bien"): return "Bien"
-    elif d.startswith("servicio"): return "Servicio"
-    elif d.startswith("obra"): return "Obra"
+    if "bien" in d or d.startswith("b:"): return "Bien"
+    elif "servicio" in d or d.startswith("s:"): return "Servicio"
+    elif "obra" in d or d.startswith("o:"): return "Obra"
     elif "consultor" in d: return "Consultoría"
     else: return "Otro"
+
+def inferir_region(entidad: str, texto_tarjeta: str) -> str:
+    """
+    Intenta extraer la ubicación del texto de la tarjeta.
+    Si no la encuentra, la deduce del nombre de la Entidad.
+    """
+    texto_busqueda = (entidad + " " + texto_tarjeta).upper()
+
+    # 1. Buscar etiqueta explícita "Ubicación:"
+    match_ubi = re.search(r"UBICACI[ÓO]N[:\s]+([^:\n]+)", texto_busqueda)
+    if match_ubi:
+        posible_ubi = match_ubi.group(1)
+        # Validar si contiene un departamento conocido
+        for d in DEPARTAMENTOS_PERU:
+            if d in posible_ubi:
+                return posible_ubi.strip()
+
+    # 2. Si falla, buscar el nombre del departamento en la Entidad
+    for d in DEPARTAMENTOS_PERU:
+        if d in texto_busqueda:
+            return d
+
+    return "NO IDENTIFICADO"
+
+def extraer_fechas_cronograma(texto_tarjeta: str):
+    """
+    Extrae fecha de inicio y fin de presentación de ofertas usando Regex.
+    Busca patrones como 'Inicio:', 'Cierre:', 'Hasta:'.
+    """
+    fechas = {"inicio": None, "fin": None}
+
+    # Patrón para fechas dd/mm/yyyy HH:mm
+    regex_fecha = r"(\d{2}/\d{2}/\d{4}\s+\d{2}:\d{2})"
+
+    # Buscar Fecha Inicio (Presentación)
+    match_ini = re.search(r"(?:Inicio|Desde|Presentación).*?" + regex_fecha, texto_tarjeta, re.IGNORECASE)
+    if match_ini:
+        fechas["inicio"] = match_ini.group(1)
+
+    # Buscar Fecha Fin (Cierre)
+    match_fin = re.search(r"(?:Fin|Hasta|Cierre|Límite).*?" + regex_fecha, texto_tarjeta, re.IGNORECASE)
+    if match_fin:
+        fechas["fin"] = match_fin.group(1)
+
+    return fechas
 
 async def get_cubso(page, url):
     if url == "No disponible": return "No disponible"
     try:
-        await page.goto(url, timeout=15000) # Timeout corto para no demorar
-        await page.wait_for_selector("body", timeout=10000)
+        # Timeout corto (10s) para no bloquear el proceso si falla
+        await page.goto(url, timeout=10000)
         content = await page.content()
         soup = BeautifulSoup(content, "html.parser")
         match = re.search(r"\b\d{13,16}\b", soup.get_text())
         return match.group() if match else "No encontrado"
     except Exception:
-        return "Error"
+        return "N/A"
 
 async def run_scraper(fecha_inicio_str: str, fecha_fin_str: str, max_items: int, include_cubso: bool):
     items_data = []
 
-    # 1. Preparar fechas
+    # 1. Preparar fechas (Conversión)
     try:
         f_inicio = datetime.strptime(fecha_inicio_str, "%d/%m/%Y")
         f_fin = datetime.strptime(fecha_fin_str, "%d/%m/%Y")
-        # Ajustamos fin al final del día
         f_fin = f_fin.replace(hour=23, minute=59, second=59)
     except ValueError:
-        logger.error("Formato de fecha incorrecto. Use dd/mm/yyyy")
+        logger.error("Formato de fecha incorrecto.")
         return []
 
-    logger.info(f"🔎 OBJETIVO: Buscar todas las licitaciones entre {f_inicio} y {f_fin}")
+    logger.info(f"🔎 OBJETIVO: Buscar licitaciones entre {f_inicio} y {f_fin}")
 
     async with async_playwright() as p:
         # Lanzamiento optimizado para servidor (headless)
@@ -71,32 +112,32 @@ async def run_scraper(fecha_inicio_str: str, fecha_fin_str: str, max_items: int,
             headless=True,
             args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-gpu", "--single-process"]
         )
-        context = await browser.new_context(viewport={"width": 1280, "height": 800})
+        # Viewport grande ayuda a que el texto se renderice completo
+        context = await browser.new_context(viewport={"width": 1920, "height": 1080})
         page = await context.new_page()
 
         try:
             logger.info("🌍 Navegando a SEACE...")
             await page.goto(SEACE_URL, timeout=60000)
 
-            # Esperar carga inicial
+            # Esperar a que cargue la lista
             try:
                 await page.wait_for_selector('div[class*="bg-fondo-section"]', timeout=30000)
             except:
-                logger.warning("⚠️ Alerta: Carga lenta detectada.")
+                logger.warning("Carga lenta, intentando continuar...")
 
-            # Intentar poner 100 resultados por página para ir más rápido
+            # Intentar cambiar a 100 resultados (opcional, ayuda a ir más rápido)
             try:
                 await page.get_by_role("combobox").click()
                 await page.get_by_text("100").click()
                 await asyncio.sleep(3)
             except:
-                pass # Si falla, seguimos con 10
+                pass
 
             page_count = 1
-            max_paginas = 300 # Límite de seguridad alto
+            max_paginas = 300
             stop_scraping = False
-
-            # Si el usuario no mandó límite, asumimos infinito (solo manda el rango de fechas)
+            # Si no hay límite, ponemos uno muy alto
             limit_count = max_items if max_items is not None and max_items > 0 else 999999
 
             while page_count <= max_paginas and not stop_scraping:
@@ -106,10 +147,8 @@ async def run_scraper(fecha_inicio_str: str, fecha_fin_str: str, max_items: int,
 
                 logger.info(f"📄 Procesando PÁGINA {page_count} | Llevamos: {len(items_data)}")
 
-                # Recoger tarjetas
                 cards = await page.query_selector_all('div[class*="bg-fondo-section"]')
                 if not cards:
-                    logger.info("🛑 No hay más tarjetas en la lista.")
                     break
 
                 items_added_this_page = 0
@@ -119,52 +158,64 @@ async def run_scraper(fecha_inicio_str: str, fecha_fin_str: str, max_items: int,
                         break
 
                     try:
-                        # Extraemos TODO el texto visible de la tarjeta
+                        # Extraer todo el texto visible e HTML
                         text_content = await card.inner_text()
+                        html_content = await card.inner_html()
+                        soup = BeautifulSoup(html_content, "html.parser")
+                        p_tags = soup.select("p")
 
-                        # Buscamos la fecha ahí dentro
-                        fecha_obj = parse_fecha_regex(text_content)
+                        # --- 1. Detectar Fecha de Publicación ---
+                        # Buscamos "Publicación" seguido de fecha
+                        match_pub = re.search(r"Publicaci[oó]n.*(\d{2}/\d{2}/\d{4}\s+\d{2}:\d{2})", text_content, re.IGNORECASE)
 
-                        if not fecha_obj:
-                            # Si no hay fecha legible, saltamos por seguridad
-                            continue
+                        # Fallback: si no encuentra etiqueta, busca la primera fecha disponible
+                        if not match_pub:
+                            match_pub = re.search(r"(\d{2}/\d{2}/\d{4}\s+\d{2}:\d{2})", text_content)
 
-                        # === LÓGICA CRÍTICA DE FECHAS ===
+                        if not match_pub:
+                            continue # Sin fecha no sirve
 
+                        fecha_pub_str = match_pub.group(1)
+                        fecha_obj = datetime.strptime(fecha_pub_str, "%d/%m/%Y %H:%M")
+
+                        # --- 2. Validar Rango de Fechas ---
                         if fecha_obj > f_fin:
-                            # Fecha del item (ej: 16/12) > Fecha fin (12/12) -> Es muy nuevo
-                            # NO paramos, solo saltamos este item y seguimos buscando
-                            continue
+                            continue # Muy nuevo, seguir buscando
 
                         if fecha_obj < f_inicio:
-                            # Fecha del item (ej: 04/12) < Fecha inicio (05/12) -> Es muy viejo
-                            # AQUÍ PARAMOS TODO EL PROCESO
-                            logger.info(f"🛑 Se encontró fecha antigua ({fecha_obj}). Fin de la búsqueda.")
+                            logger.info(f"🛑 Fecha encontrada ({fecha_obj}) anterior al inicio. Deteniendo.")
                             stop_scraping = True
                             break
 
-                            # Si llegamos aquí, la fecha está DENTRO del rango
-                        # Extraemos los datos restantes
-                        lines = [l.strip() for l in text_content.split('\n') if l.strip()]
+                            # --- 3. Extraer Datos ---
+                        # Nomenclatura, Entidad y Descripción suelen ser los primeros párrafos
+                        nomenclatura = limpiar_texto(p_tags[0].get_text()) if len(p_tags) > 0 else "S/D"
+                        entidad = limpiar_texto(p_tags[1].get_text()) if len(p_tags) > 1 else "S/D"
+                        descripcion = limpiar_texto(p_tags[2].get_text()) if len(p_tags) > 2 else "S/D"
 
-                        # Extracción heurística simple
-                        codigo = lines[0] if lines else "S/D"
-                        entidad = lines[1] if len(lines) > 1 else "S/D"
-                        desc = lines[2] if len(lines) > 2 else "S/D"
+                        # Extraer Fechas Cronograma (Inicio/Fin)
+                        fechas_crono = extraer_fechas_cronograma(text_content)
 
-                        # Obtener enlace
-                        html = await card.inner_html()
-                        soup = BeautifulSoup(html, "html.parser")
+                        # Extraer Región
+                        region = inferir_region(entidad, text_content)
+
+                        # Enlace
                         link_elem = soup.select_one("a[href*='/buscador-publico/contrataciones/']")
                         enlace = urljoin(SEACE_URL, link_elem["href"]) if link_elem else "No disponible"
 
                         items_data.append({
-                            "codigo": codigo,
-                            "entidad": entidad,
-                            "descripcion": desc,
-                            "tipo": extraer_tipo(desc),
-                            "fecha_publicacion": fecha_obj.strftime("%d/%m/%Y %H:%M"),
-                            "enlace": enlace,
+                            "nomenclatura": nomenclatura,
+                            "entidad_solicitante": entidad,
+                            "descripcion": descripcion,
+                            "objeto": extraer_tipo(descripcion),
+                            "region": region,
+                            "fecha_publicacion": fecha_pub_str,
+                            "fecha_inicio": fechas_crono["inicio"],
+                            "fecha_fin": fechas_crono["fin"],
+                            "moneda": "SOLES", # Dato por defecto en SEACE público
+                            "valor_referencial": "---", # Dato oculto en búsqueda pública
+                            "descripcion_item": descripcion, # Suele ser igual al requerimiento
+                            "url": enlace,
                             "cubso": None
                         })
                         items_added_this_page += 1
@@ -172,28 +223,28 @@ async def run_scraper(fecha_inicio_str: str, fecha_fin_str: str, max_items: int,
                     except Exception as e:
                         continue
 
-                logger.info(f"   --> Agregados en esta página: {items_added_this_page}")
+                logger.info(f"   --> Agregados: {items_added_this_page}")
 
                 if stop_scraping:
                     break
 
-                # Ir a página siguiente
+                # Paginación
                 next_btn = await page.query_selector("button[aria-label*='iguiente']:not([disabled])")
                 if next_btn:
                     await next_btn.click()
-                    await asyncio.sleep(1.5) # Pausa ligera
-                    await page.wait_for_timeout(500) # Estabilidad
+                    await asyncio.sleep(1.5)
+                    await page.wait_for_timeout(1000)
                     page_count += 1
                 else:
-                    logger.info("🚫 No hay botón siguiente.")
                     break
 
-            # Extracción de CUBSO (Opcional)
+            # Extracción de CUBSO (Solo si se pide)
             if include_cubso and items_data:
-                logger.info(f"🛠 Extrayendo CUBSO para {len(items_data)} registros...")
-                for item in items_data:
-                    if item["enlace"] != "No disponible":
-                        item["cubso"] = await get_cubso(page, item["enlace"])
+                logger.info("🛠 Extrayendo CUBSO...")
+                # Limitamos a primeros 50 para no colgar por timeout en modo síncrono
+                for item in items_data[:50]:
+                    if item["url"] != "No disponible":
+                        item["cubso"] = await get_cubso(page, item["url"])
                     else:
                         item["cubso"] = "N/A"
 
@@ -203,5 +254,5 @@ async def run_scraper(fecha_inicio_str: str, fecha_fin_str: str, max_items: int,
         finally:
             await browser.close()
 
-    logger.info(f"✅ FIN DEL SCRAPING. Total recolectado: {len(items_data)}")
+    logger.info(f"✅ FIN. Total recolectado: {len(items_data)}")
     return items_data
