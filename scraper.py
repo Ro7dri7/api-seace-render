@@ -12,7 +12,6 @@ logger = logging.getLogger("SEACE_Scraper")
 
 SEACE_URL = "https://prod6.seace.gob.pe/buscador-publico/contrataciones"
 
-# Palabras que son estados y NO deben ser detectadas como Entidad
 ESTADOS_IGNORAR = [
     "VIGENTE", "EN EVALUACION", "EN EVALUACIÓN",
     "ADJUDICADO", "DESIERTO", "CANCELADO",
@@ -31,7 +30,6 @@ def limpiar_texto(texto: str) -> str:
     return re.sub(r'\s+', ' ', texto).strip()
 
 def parse_fecha_regex(texto_completo: str):
-    """Busca fecha de publicación (dd/mm/yyyy)."""
     match = re.search(r"Publicaci[oó]n.*?(\d{2}/\d{2}/\d{4})", texto_completo, re.IGNORECASE)
     if match:
         return datetime.strptime(match.group(1), "%d/%m/%Y")
@@ -45,18 +43,14 @@ def parse_fecha_regex(texto_completo: str):
     return None
 
 def extraer_tipo_exacto(desc: str) -> str:
-    """Clasifica: Bien, Servicio, Obra o Consultoría."""
     if not isinstance(desc, str): return "Otro"
-
     d_upper = desc.upper().strip()
 
-    # 1. Búsqueda EXACTA por prefijo
     if d_upper.startswith("BIEN") or "BIEN:" in d_upper: return "Bien"
     if d_upper.startswith("SERVICIO") or "SERVICIO:" in d_upper: return "Servicio"
     if d_upper.startswith("OBRA") or "OBRA:" in d_upper: return "Obra"
     if "CONSULTOR" in d_upper: return "Consultoría"
 
-    # 2. Fallback: Palabras clave
     keywords_obra = ["MEJORAMIENTO", "CREACION", "REHABILITACION", "CONSTRUCCION", "INSTALACION", "EJECUCION DE OBRA"]
     if any(k in d_upper for k in keywords_obra): return "Obra"
 
@@ -81,7 +75,7 @@ def inferir_region(entidad: str, texto_tarjeta: str) -> str:
             return d
     return "NO IDENTIFICADO"
 
-async def run_scraper(fecha_inicio_str: str, fecha_fin_str: str, max_items: int):
+async def run_scraper(fecha_inicio_str: str, fecha_fin_str: str, max_items: int, user_phone: str = None):
     items_data = []
 
     try:
@@ -92,7 +86,7 @@ async def run_scraper(fecha_inicio_str: str, fecha_fin_str: str, max_items: int)
         logger.error("Formato de fecha incorrecto. Use dd/mm/yyyy")
         return []
 
-    logger.info(f"🔎 OBJETIVO: {f_inicio.date()} a {f_fin.date()}")
+    logger.info(f"🔎 OBJETIVO: {f_inicio.date()} a {f_fin.date()} | Usuario: {user_phone}")
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(
@@ -106,13 +100,11 @@ async def run_scraper(fecha_inicio_str: str, fecha_fin_str: str, max_items: int)
             logger.info("🌍 Navegando a SEACE...")
             await page.goto(SEACE_URL, timeout=60000)
 
-            # Esperar carga inicial
             try:
                 await page.wait_for_selector('div[class*="bg-fondo-section"]', timeout=30000)
             except:
                 logger.warning("⚠ Alerta: Carga lenta detectada.")
 
-            # Cambiar a 100 resultados
             try:
                 await page.wait_for_timeout(2000)
                 await page.get_by_role("combobox").click()
@@ -155,20 +147,13 @@ async def run_scraper(fecha_inicio_str: str, fecha_fin_str: str, max_items: int)
                             stop_scraping = True
                             break
 
-                        # === LÓGICA DE EXTRACCIÓN ===
                         raw_lines = [l.strip() for l in text_content.split('\n') if l.strip()]
-
-                        # Filtro de estados (VIGENTE, etc.)
-                        clean_lines = [
-                            line for line in raw_lines
-                            if line.upper() not in ESTADOS_IGNORAR
-                        ]
+                        clean_lines = [line for line in raw_lines if line.upper() not in ESTADOS_IGNORAR]
 
                         nomenclatura = clean_lines[0] if len(clean_lines) > 0 else "S/D"
                         entidad = clean_lines[1] if len(clean_lines) > 1 else "S/D"
                         descripcion = clean_lines[2] if len(clean_lines) > 2 else "S/D"
 
-                        # Corrección si la descripción no quedó en la línea 2
                         for line in clean_lines:
                             if re.match(r"^(Bien|Servicio|Obra|Consultor)", line, re.IGNORECASE):
                                 descripcion = line
@@ -184,17 +169,18 @@ async def run_scraper(fecha_inicio_str: str, fecha_fin_str: str, max_items: int)
 
                         if not enlace: continue
 
-                        # === OBJETO FINAL LIMPIO (SIN FECHAS INICIO/FIN NI VALOR REF) ===
                         items_data.append({
                             "nomenclatura": nomenclatura,
                             "entidad_solicitante": entidad,
                             "descripcion": descripcion,
                             "objeto": tipo_objeto,
                             "region": region,
-                            "fecha_publicacion": fecha_obj.strftime("%d/%m/%Y"),
+                            # --- CORRECCIÓN AQUÍ: Formato SQL YYYY-MM-DD ---
+                            "fecha_publicacion": fecha_obj.strftime("%Y-%m-%d"),
                             "moneda": "SOLES",
-                            "descripcion_item": descripcion, # Redundante pero útil
-                            "url": enlace
+                            "descripcion_item": descripcion,
+                            "url": enlace,
+                            "user_phone": user_phone
                         })
                         items_added_this_page += 1
 
