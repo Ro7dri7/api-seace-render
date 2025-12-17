@@ -12,7 +12,13 @@ logger = logging.getLogger("SEACE_Scraper")
 
 SEACE_URL = "https://prod6.seace.gob.pe/buscador-publico/contrataciones"
 
-# --- LISTA DE DEPARTAMENTOS ---
+# Lista de palabras que NO son entidades, son estados del proceso
+ESTADOS_IGNORAR = [
+    "VIGENTE", "EN EVALUACION", "EN EVALUACIÓN",
+    "ADJUDICADO", "DESIERTO", "CANCELADO",
+    "CONCLUIDO", "NULO", "SUSPENDIDO"
+]
+
 DEPARTAMENTOS_PERU = [
     "AMAZONAS", "ANCASH", "APURIMAC", "AREQUIPA", "AYACUCHO", "CAJAMARCA", "CALLAO",
     "CUSCO", "HUANCAVELICA", "HUANUCO", "ICA", "JUNIN", "LA LIBERTAD",
@@ -38,37 +44,35 @@ def parse_fecha_regex(texto_completo: str):
             return None
     return None
 
-def extraer_tipo(desc: str) -> str:
+def extraer_tipo_exacto(desc: str) -> str:
     """
-    Clasifica el objeto basándose en palabras clave si no hay prefijo explícito.
+    Extrae el tipo basándose en el prefijo explícito 'Bien:', 'Servicio:', 'Obra:'.
+    Si no tiene prefijo, usa palabras clave.
     """
     if not isinstance(desc, str): return "Otro"
 
-    d = desc.upper() # Convertimos a mayúsculas para comparar mejor
+    d_upper = desc.upper().strip()
 
-    # 1. Prefijos explícitos (Prioridad Alta)
-    if d.startswith("BIEN") or "BIEN:" in d: return "Bien"
-    if d.startswith("SERVICIO") or "SERVICIO:" in d: return "Servicio"
-    if d.startswith("OBRA") or "OBRA:" in d: return "Obra"
-    if "CONSULTOR" in d: return "Consultoría"
-
-    # 2. Palabras clave de OBRAS
-    # "Mejoramiento", "Creación", "Rehabilitación", "Construcción", "Instalación"
-    keywords_obra = ["MEJORAMIENTO", "CREACION", "REHABILITACION", "CONSTRUCCION", "INSTALACION", "RENOVACION", "SALDO DE OBRA"]
-    if any(k in d for k in keywords_obra):
-        return "Obra"
-
-    # 3. Palabras clave de SERVICIOS
-    # "Contratación de servicio", "Mantenimiento", "Alquiler", "Consultoría" (si no cayó antes), "Seguro", "Vigilancia"
-    keywords_servicio = ["MANTENIMIENTO", "ALQUILER", "SEGURIDAD", "VIGILANCIA", "LIMPIEZA", "TRANSPORTE", "SEGURO", "LOCACION", "CONFECCION", "SERVICIO"]
-    if any(k in d for k in keywords_servicio):
-        return "Servicio"
-
-    # 4. Palabras clave de BIENES
-    # "Adquisición", "Compra", "Suministro"
-    keywords_bien = ["ADQUISICION", "COMPRA", "SUMINISTRO", "CAMIONETA", "COMBUSTIBLE", "EQUIPO", "MATERIAL", "INSUMO"]
-    if any(k in d for k in keywords_bien):
+    # 1. Búsqueda EXACTA por prefijo (Lo más fiable según tu imagen)
+    # Ejemplo: "Bien: ADQUISICION DE..."
+    if d_upper.startswith("BIEN") or "BIEN:" in d_upper:
         return "Bien"
+    if d_upper.startswith("SERVICIO") or "SERVICIO:" in d_upper:
+        return "Servicio"
+    if d_upper.startswith("OBRA") or "OBRA:" in d_upper:
+        return "Obra"
+    if "CONSULTOR" in d_upper:
+        return "Consultoría"
+
+    # 2. Fallback: Palabras clave si falta el prefijo
+    keywords_obra = ["MEJORAMIENTO", "CREACION", "REHABILITACION", "CONSTRUCCION", "INSTALACION", "EJECUCION DE OBRA"]
+    if any(k in d_upper for k in keywords_obra): return "Obra"
+
+    keywords_servicio = ["MANTENIMIENTO", "ALQUILER", "SEGURIDAD", "VIGILANCIA", "LIMPIEZA", "TRANSPORTE", "SEGURO", "LOCACION", "CONFECCION", "SERVICIO"]
+    if any(k in d_upper for k in keywords_servicio): return "Servicio"
+
+    keywords_bien = ["ADQUISICION", "COMPRA", "SUMINISTRO", "CAMIONETA", "COMBUSTIBLE", "EQUIPO", "MATERIAL", "INSUMO"]
+    if any(k in d_upper for k in keywords_bien): return "Bien"
 
     return "Otro"
 
@@ -122,11 +126,13 @@ async def run_scraper(fecha_inicio_str: str, fecha_fin_str: str, max_items: int)
             logger.info("🌍 Navegando a SEACE...")
             await page.goto(SEACE_URL, timeout=60000)
 
+            # Esperar carga inicial
             try:
                 await page.wait_for_selector('div[class*="bg-fondo-section"]', timeout=30000)
             except:
                 logger.warning("⚠ Alerta: Carga lenta detectada.")
 
+            # Cambiar a 100 resultados
             try:
                 await page.wait_for_timeout(2000)
                 await page.get_by_role("combobox").click()
@@ -164,24 +170,44 @@ async def run_scraper(fecha_inicio_str: str, fecha_fin_str: str, max_items: int)
                         if not fecha_obj: continue
 
                         if fecha_obj > f_fin: continue
-
                         if fecha_obj < f_inicio:
                             logger.info(f"🛑 Fecha límite alcanzada ({fecha_obj.date()}). Fin.")
                             stop_scraping = True
                             break
 
-                        lines = [l.strip() for l in text_content.split('\n') if l.strip()]
+                        # === LÓGICA DE EXTRACCIÓN MEJORADA ===
 
-                        nomenclatura = lines[0] if lines else "S/D"
-                        entidad = lines[1] if len(lines) > 1 else "S/D"
-                        descripcion = lines[2] if len(lines) > 2 else "S/D"
+                        # 1. Dividimos por líneas y limpiamos espacios
+                        raw_lines = [l.strip() for l in text_content.split('\n') if l.strip()]
 
+                        # 2. FILTRO DE ESTADOS: Eliminamos líneas que sean solo "VIGENTE", "EN EVALUACION", etc.
+                        clean_lines = [
+                            line for line in raw_lines
+                            if line.upper() not in ESTADOS_IGNORAR
+                        ]
+
+                        # 3. Asignación inteligente basada en posición
+                        # Línea 0: Nomenclatura (CM-xxx...)
+                        # Línea 1: Entidad (Municipalidad...)
+                        # Línea 2: Descripción (Bien: Adquisición...)
+
+                        nomenclatura = clean_lines[0] if len(clean_lines) > 0 else "S/D"
+                        entidad = clean_lines[1] if len(clean_lines) > 1 else "S/D"
+                        descripcion = clean_lines[2] if len(clean_lines) > 2 else "S/D"
+
+                        # Si la descripción quedó vacía o parece una fecha, intentamos buscarla
+                        # Buscamos la línea que empiece con Bien:/Servicio:/Obra: si la posición falla
+                        for line in clean_lines:
+                            if re.match(r"^(Bien|Servicio|Obra|Consultor)", line, re.IGNORECASE):
+                                descripcion = line
+                                break
+
+                        # 4. Extraer datos derivados
                         region = inferir_region(entidad, text_content)
                         fechas_crono = extraer_fechas_cronograma(text_content)
+                        tipo_objeto = extraer_tipo_exacto(descripcion) # Ahora usa la descripción correcta
 
-                        # --- NUEVA CLASIFICACIÓN ---
-                        tipo_objeto = extraer_tipo(descripcion)
-
+                        # Extraer URL
                         html = await card.inner_html()
                         soup = BeautifulSoup(html, "html.parser")
                         link_elem = soup.select_one("a[href*='/buscador-publico/contrataciones/']")
