@@ -4,14 +4,18 @@ from typing import Optional
 from scraper import run_scraper
 import uvicorn
 import os
+import logging
+
+# Configuración de logs para la API
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("API")
 
 app = FastAPI(title="API Scraper SEACE")
 
 class ScrapeRequest(BaseModel):
     fecha_inicio: str  # Formato dd/mm/yyyy
     fecha_fin: str     # Formato dd/mm/yyyy
-    max_resultados: Optional[int] = None  # Sin límite por defecto
-    # Se eliminó incluir_cubso porque ya no existe en el scraper
+    max_resultados: Optional[int] = None  # Opcional: si no se envía, busca todo
 
 @app.get("/")
 def read_root():
@@ -31,10 +35,9 @@ async def scrape_endpoint(request: ScrapeRequest):
         raise HTTPException(status_code=400, detail="Las fechas deben tener formato dd/mm/yyyy")
 
     try:
-        print(f"Solicitud recibida: {request}")
+        logger.info(f"📩 Solicitud recibida: {request}")
 
-        # --- CORRECCIÓN AQUÍ ---
-        # Solo pasamos los 3 argumentos que acepta el nuevo scraper.py
+        # Llamada al scraper con los 3 argumentos correctos
         data = await run_scraper(
             request.fecha_inicio,
             request.fecha_fin,
@@ -44,7 +47,7 @@ async def scrape_endpoint(request: ScrapeRequest):
         return {"cantidad": len(data), "resultados": data}
 
     except Exception as e:
-        print(f"Error interno en scraper: {e}")
+        logger.error(f"❌ Error interno en scraper: {e}")
         raise HTTPException(status_code=500, detail=f"Error al procesar la solicitud: {str(e)}")
 
 if __name__ == "__main__":
